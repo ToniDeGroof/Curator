@@ -1,0 +1,7 @@
+# Negeer Streamlit geheime sleutels (HEEL BELANGRIJK!)
+.streamlit/secrets.toml
+
+# Negeer eventuele lokale omgeving-bestanden
+.env
+*.pyc
+__pycache__/

@@ -1,0 +1,426 @@
+import streamlit as st
+import json
+from datetime import date
+import pandas as pd
+from PIL import Image
+import io
+import base64
+from supabase import create_client, Client
+from openai import OpenAI
+
+# ==========================================
+# 1. INITIALISATIE & SECRETS
+# ==========================================
+st.set_page_config(page_title="Fotografie Curator Studio", layout="wide", page_icon="📷")
+
+# Supabase Verbinding via secrets.toml
+@st.cache_resource
+def init_supabase() -> Client:
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except KeyError as e:
+        st.error(f"❌ Ontbrekende sleutel in secrets.toml: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Kan geen verbinding maken met Supabase: {e}")
+        st.stop()
+
+# OpenAI Client via secrets.toml
+@st.cache_resource
+def init_openai() -> OpenAI:
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        return OpenAI(api_key=api_key)
+    except KeyError:
+        st.warning("⚠️ Geen OPENAI_API_KEY gevonden in secrets.toml. AI-analyse zal niet werken.")
+        return None
+
+supabase = init_supabase()
+openai_client = init_openai()
+
+# Hulpfunctie om afbeelding naar base64 om te zetten voor OpenAI Vision
+def encode_image(image_bytes):
+    return base64.b64encode(image_bytes).decode('utf-8')
+
+# ==========================================
+# 2. POP-UP: FOTO PASPOORT (DIALOG)
+# ==========================================
+@st.dialog("Foto Paspoort", width="large")
+def show_foto_paspoort(foto_id):
+    """Toont het visuele Foto Paspoort met Supabase-data, scorebalkjes en flexibele tags."""
+    response = supabase.table("beoordelingen").select("*").eq("id", foto_id).execute()
+    data = response.data
+
+    if not data:
+        st.error("Foto niet gevonden in Supabase.")
+        return
+
+    foto = data[0]
+
+    # Tags verwerken (JSON string of Python list)
+    raw_tags = foto.get("tags")
+    if isinstance(raw_tags, str):
+        try:
+            tags = json.loads(raw_tags)
+        except Exception:
+            tags = []
+    elif isinstance(raw_tags, list):
+        tags = raw_tags
+    else:
+        tags = []
+
+    col_img, col_details = st.columns([1, 1], gap="medium")
+
+    with col_img:
+        if foto.get("afbeelding_url"):
+            st.image(foto["afbeelding_url"], use_container_width=True)
+        elif foto.get("afbeelding_blob"):
+            image = Image.open(io.BytesIO(bytes(foto["afbeelding_blob"])))
+            st.image(image, use_container_width=True)
+        else:
+            st.info("Geen voorbeeldweergave beschikbaar.")
+
+        st.caption(f"📁 **Bestand:** {foto.get('bestandsnaam', 'Onbekend')}")
+
+    with col_details:
+        st.subheader(foto.get("titel") or "Naamloze foto")
+        totaal = foto.get("totaalscore", 0) or 0
+        st.write(f"**Eindscore:** ⭐ `{totaal:.1f} / 100`")
+        
+        # Metadata chips
+        st.markdown(f"🗓️ **Datum:** `{foto.get('analyse_datum', '-')}` | ⚙️ **Module:** `{foto.get('module', '-')}`")
+        st.markdown(f"📐 **Formaat:** `{foto.get('formaat', '-')}` | 🎨 **Kleurtype:** `{foto.get('kleurtype', '-')}`")
+
+        st.divider()
+
+        # Artistiek Profiel - Horizontale Balken
+        st.markdown("### 📊 Artistiek Profiel Scores")
+        
+        licht = float(foto.get("licht_dramatiek", 0) or 0)
+        melancholie = float(foto.get("melancholie", 0) or 0)
+        intimiteit = float(foto.get("intimiteit", 0) or 0)
+        spanning = float(foto.get("visuele_spanning", 0) or 0)
+
+        st.write(f"**Licht-dramatiek:** {licht:.0f}%")
+        st.progress(min(max(int(licht), 0), 100))
+
+        st.write(f"**Melancholie:** {melancholie:.0f}%")
+        st.progress(min(max(int(melancholie), 0), 100))
+
+        st.write(f"**Intimiteit:** {intimiteit:.0f}%")
+        st.progress(min(max(int(intimiteit), 0), 100))
+
+        st.write(f"**Visuele Spanning:** {spanning:.0f}%")
+        st.progress(min(max(int(spanning), 0), 100))
+
+        st.divider()
+
+        # Dynamisch Tag Beheer
+        st.markdown("### 🏷️ Flexibele Doelen & Tags")
+        st.caption("Beheer doelen voor deze foto:")
+        
+        nieuwe_tags = st.multiselect(
+            "Beheer tags voor deze foto:",
+            options=["Instagram", "Fotoboek", "Expositie", "Autonoom Eindwerk", "Website", "Portfolio", "Kandidaat"],
+            default=tags,
+            key=f"tags_select_{foto_id}"
+        )
+
+        col_save_tag, col_delete = st.columns([1, 1])
+
+        with col_save_tag:
+            if st.button("💾 Tags Opslaan in Supabase", key=f"save_tags_{foto_id}"):
+                supabase.table("beoordelingen").update({"tags": json.dumps(nieuwe_tags)}).eq("id", foto_id).execute()
+                st.success("Tags bijgewerkt in Supabase!")
+                st.rerun()
+
+        with col_delete:
+            if st.button("🗑️ Verwijder uit Supabase", type="primary", key=f"del_foto_{foto_id}"):
+                supabase.table("beoordelingen").delete().eq("id", foto_id).execute()
+                st.success("Foto definitief verwijderd.")
+                st.rerun()
+
+# ==========================================
+# 3. HOOFDINTERFACE EN TABS
+# ==========================================
+st.title("📷 Fotografie Curator & Analyse Studio")
+
+tab1, tab2 = st.tabs(["📥 Tab 1: Analyse & Invoer", "🎨 Tab 2: Curator Studio"])
+
+# ------------------------------------------
+# TAB 1: ANALYSE & INVOER (OPENAI + SUPABASE)
+# ------------------------------------------
+with tab1:
+    st.header("Foto Analyseren & Opslaan in Supabase")
+    st.caption("Upload een bewerkte foto uit Lightroom voor AI-analyse via OpenAI.")
+
+    uploaded_file = st.file_uploader("Kies een foto (JPG, PNG)", type=["jpg", "jpeg", "png"])
+
+    if uploaded_file is not None:
+        col_prev, col_form = st.columns([1, 1])
+        
+        image_bytes = uploaded_file.read()
+        image = Image.open(io.BytesIO(image_bytes))
+        width, height = image.size
+
+        # Automatische formaat detectie
+        if abs(width - height) / max(width, height) < 0.05:
+            berekend_formaat = "Vierkant"
+        elif width > height:
+            berekend_formaat = "Liggend"
+        else:
+            berekend_formaat = "Staand"
+
+        with col_prev:
+            st.image(image, caption=f"{uploaded_file.name} ({width}x{height}px)", use_container_width=True)
+
+        with col_form:
+            st.subheader("Analyse Instellingen")
+            titel_input = st.text_input("Titel van de foto", value=uploaded_file.name.split(".")[0])
+            module_input = st.selectbox("Analyse Module", ["Module 1: Algemene Analyse", "Module 2: Portret & Mens", "Module 3: Landschap & Architectuur"])
+            kleurtype_input = st.radio("Kleurtype", ["Kleur", "Zwart-wit"], horizontal=True)
+            formaat_input = st.selectbox("Formaat", ["Liggend", "Staand", "Vierkant"], index=["Liggend", "Staand", "Vierkant"].index(berekend_formaat))
+
+            st.markdown("---")
+            if st.button("🚀 Voer AI-Analyse Uit & Sla Op in Supabase", type="primary"):
+                if not openai_client:
+                    st.error("OpenAI client is niet geïnitialiseerd. Controleer `OPENAI_API_KEY` in `secrets.toml`.")
+                else:
+                    with st.spinner("AI analyseert de afbeelding..."):
+                        try:
+                            # Base64 codering van de foto voor GPT-4o
+                            base64_img = encode_image(image_bytes)
+
+                            prompt = f"""
+                            Analyseer deze foto als een professionele fotocurator op basis van de volgende criteria:
+                            - Titel: {titel_input}
+                            - Kleurtype: {kleurtype_input}
+                            - Formaat: {formaat_input}
+                            
+                            Geef de uitvoer UITSLUITEND in geldig JSON formaat zonder extra tekst:
+                            {{
+                                "totaalscore": <getal 0-100>,
+                                "licht_dramatiek": <getal 0-100>,
+                                "melancholie": <getal 0-100>,
+                                "intimiteit": <getal 0-100>,
+                                "visuele_spanning": <getal 0-100>
+                            }}
+                            """
+
+                            response = openai_client.chat.completions.create(
+                                model="gpt-4o",
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": prompt},
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": f"data:image/jpeg;base64,{base64_img}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ],
+                                max_tokens=300
+                            )
+
+                            res_text = response.choices[0].message.content.strip()
+                            # Strip markdown code blocks als die er zijn
+                            if res_text.startswith("```json"):
+                                res_text = res_text[7:-3].strip()
+                            elif res_text.startswith("```"):
+                                res_text = res_text[3:-3].strip()
+
+                            scores = json.loads(res_text)
+
+                            payload = {
+                                "bestandsnaam": uploaded_file.name,
+                                "titel": titel_input,
+                                "analyse_datum": date.today().strftime("%Y-%m-%d"),
+                                "module": module_input,
+                                "formaat": formaat_input,
+                                "kleurtype": kleurtype_input,
+                                "totaalscore": float(scores.get("totaalscore", 75)),
+                                "melancholie": float(scores.get("melancholie", 50)),
+                                "intimiteit": float(scores.get("intimiteit", 50)),
+                                "licht_dramatiek": float(scores.get("licht_dramatiek", 50)),
+                                "visuele_spanning": float(scores.get("visuele_spanning", 50)),
+                                "tags": json.dumps(["Kandidaat"])
+                            }
+
+                            supabase.table("beoordelingen").insert(payload).execute()
+                            st.success(f"✅ Foto '{titel_input}' geanalyseerd met OpenAI en opgeslagen in Supabase!")
+                            st.info("💡 Bekijk de resultaten in **Tab 2: Curator Studio**.")
+
+                        except Exception as e:
+                            st.error(f"❌ Fout bij AI-analyse of opslaan: {e}")
+
+# ------------------------------------------
+# TAB 2: CURATOR STUDIO (SUPABASE DATA)
+# ------------------------------------------
+with tab2:
+    st.header("Curator Studio - Zoeken, Cureren & Selecteren")
+    st.caption("Alle foto's live opgeslagen in Supabase (tabel: beoordelingen).")
+
+    # Haal ALLE foto's op uit de juiste Supabase tabel ("beoordelingen")
+    try:
+        res = supabase.table("beoordelingen").select("*").execute()
+        data = res.data
+    except Exception as e:
+        st.error(f"❌ Fout bij het ophalen van data uit Supabase: {e}")
+        data = []
+
+    if not data:
+        st.warning("Geen foto's/beoordelingen gevonden in de Supabase database.")
+    else:
+        df_fotos = pd.DataFrame(data)
+
+        # --------------------------------------
+        # TWEETRAPS FILTERING (TRECHTER)
+        # --------------------------------------
+        with st.expander("🔍 **Filterpaneel (Tweetraps Trechter)**", expanded=True):
+            st.markdown("##### Stap 1: Harde / Snelle Filters (Metadata & Feiten)")
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+
+            # 🏷️ Filter op Tags (Waterdicht gemaakt voor Pandas DataFrames)
+            with f_col1:
+                unieke_tags = set()
+                if 'tags' in df_fotos.columns:
+                    for t_val in df_fotos['tags'].dropna():
+                        if isinstance(t_val, str):
+                            try:
+                                for t in json.loads(t_val):
+                                    unieke_tags.add(t)
+                            except Exception:
+                                pass
+                        elif isinstance(t_val, list):
+                            for t in t_val:
+                                unieke_tags.add(t)
+                selected_tags = st.multiselect("🏷️ Doel / Tags", sorted(list(unieke_tags)))
+
+            # ⚙️ Filter op Module
+            with f_col2:
+                if 'module' in df_fotos.columns:
+                    unieke_modules = ["Alle"] + sorted([str(m) for m in df_fotos['module'].dropna().unique()])
+                else:
+                    unieke_modules = ["Alle"]
+                selected_module = st.selectbox("⚙️ Module", unieke_modules)
+
+            # 🎨 Filter op Kleurtype
+            with f_col3:
+                selected_kleur = st.multiselect("🎨 Kleurtype", ["Kleur", "Zwart-wit"], default=["Kleur", "Zwart-wit"])
+
+            # 📐 Filter op Formaat
+            with f_col4:
+                selected_formaat = st.multiselect("📐 Formaat", ["Liggend", "Staand", "Vierkant"], default=["Liggend", "Staand", "Vierkant"])
+
+            st.markdown("---")
+            f_col5, f_col6, f_col7 = st.columns([1, 1, 2])
+
+            with f_col5:
+                min_score = st.slider("⭐ Minimale Score", 0, 100, 0)
+
+            with f_col6:
+                datum_filter = st.selectbox("🗓️ Periode", ["Alles", "Vandaag", "Laatste 30 Dagen"])
+
+            with f_col7:
+                zoekterm = st.text_input("🔎 Zoek op titel of bestandsnaam", "")
+
+            st.markdown("##### Stap 2: Inhoudelijke / Sfeer Filters (Artistiek Profiel)")
+            s_col1, s_col2, s_col3 = st.columns(3)
+            with s_col1:
+                min_licht = st.slider("Min. Licht-dramatiek", 0, 100, 0)
+            with s_col2:
+                min_melancholie = st.slider("Min. Melancholie", 0, 100, 0)
+            with s_col3:
+                min_intimiteit = st.slider("Min. Intimiteit", 0, 100, 0)
+
+        # --------------------------------------
+        # FILTER LOGICA TOEPASSEN
+        # --------------------------------------
+        filtered_df = df_fotos.copy()
+
+        # Module filter
+        if selected_module != "Alle" and 'module' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['module'] == selected_module]
+
+        # Kleurtype filter
+        if selected_kleur and 'kleurtype' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['kleurtype'].isin(selected_kleur)]
+
+        # Formaat filter
+        if selected_formaat and 'formaat' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['formaat'].isin(selected_formaat)]
+
+        # Minimale totaalscore filter
+        if 'totaalscore' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['totaalscore'].fillna(0) >= min_score]
+
+        # Zoekterm filter (op titel of bestandsnaam)
+        if zoekterm:
+            cond_titel = filtered_df['titel'].fillna('').str.contains(zoekterm, case=False) if 'titel' in filtered_df.columns else False
+            cond_bestand = filtered_df['bestandsnaam'].fillna('').str.contains(zoekterm, case=False) if 'bestandsnaam' in filtered_df.columns else False
+            filtered_df = filtered_df[cond_titel | cond_bestand]
+
+        # Tag filter
+        if selected_tags and 'tags' in filtered_df.columns:
+            def match_tags(val):
+                if isinstance(val, str):
+                    try:
+                        t_list = json.loads(val)
+                        return any(t in t_list for t in selected_tags)
+                    except Exception:
+                        return False
+                elif isinstance(val, list):
+                    return any(t in val for t in selected_tags)
+                return False
+            filtered_df = filtered_df[filtered_df['tags'].apply(match_tags)]
+
+        # Sfeer filters
+        for col, min_val in [('licht_dramatiek', min_licht), ('melancholie', min_melancholie), ('intimiteit', min_intimiteit)]:
+            if col in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df[col].fillna(0) >= min_val]
+
+        # --------------------------------------
+        # VISUELE FOTOGRID WEERGAVE
+        # --------------------------------------
+        st.markdown(f"### 🖼️ Resultaten ({len(filtered_df)} van {len(df_fotos)} foto's geselecteerd)")
+
+        if filtered_df.empty:
+            st.info("Geen foto's gevonden die voldoen aan de geselecteerde filters.")
+        else:
+            cols_per_row = 4
+            rows = [filtered_df.iloc[i:i+cols_per_row] for i in range(0, len(filtered_df), cols_per_row)]
+
+            for row in rows:
+                cols = st.columns(cols_per_row)
+                for idx, (_, foto) in enumerate(row.iterrows()):
+                    with cols[idx]:
+                        # Afbeelding weergeven
+                        if foto.get('afbeelding_url'):
+                            st.image(foto['afbeelding_url'], use_container_width=True)
+                        elif foto.get('afbeelding_blob'):
+                            try:
+                                image = Image.open(io.BytesIO(bytes(foto['afbeelding_blob'])))
+                                st.image(image, use_container_width=True)
+                            except Exception:
+                                st.write("📷 [Afbeeldingsfout]")
+                        else:
+                            st.write("📷 [Geen voorbeeld]")
+
+                        # Titel en basisinfo
+                        titel = foto.get('titel') or foto.get('bestandsnaam') or 'Naamloos'
+                        st.markdown(f"**{titel}**")
+                        
+                        score = foto.get('totaalscore') or 0
+                        kleur = foto.get('kleurtype') or '-'
+                        fmt = foto.get('formaat') or '-'
+                        st.caption(f"⭐ **{score:.1f}** | {kleur} | {fmt}")
+
+                        # Knop naar Foto Paspoort
+                        if st.button("🔎 Bekijk Paspoort", key=f"btn_paspoort_{foto.get('id', idx)}"):
+                            show_foto_paspoort(foto['id'])
