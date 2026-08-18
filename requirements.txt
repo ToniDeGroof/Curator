@@ -1,3 +1,6 @@
 streamlit
 supabase
 openai
+reportlab
+python-dotenv
+Pillow
